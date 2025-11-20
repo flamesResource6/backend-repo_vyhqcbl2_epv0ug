@@ -84,6 +84,34 @@ class PaymentRecord(BaseModel):
     checkout_session_id: Optional[str] = None
 
 # ---------------------------------------------------------------------
+# Twilio Communications Schemas
+# ---------------------------------------------------------------------
+
+class SmsMessage(BaseModel):
+    """
+    SMS messages (inbound/outbound)
+    Collection: "smsmessage"
+    """
+    to: Optional[str] = Field(None, description="Destination number (E.164)")
+    from_number: Optional[str] = Field(None, description="Sender number (E.164)")
+    body: str = Field(..., description="Message body")
+    direction: Literal["inbound", "outbound"]
+    status: Optional[str] = None
+    sid: Optional[str] = None
+
+class CallLog(BaseModel):
+    """
+    Voice call logs
+    Collection: "calllog"
+    """
+    to: Optional[str] = None
+    from_number: Optional[str] = None
+    sid: Optional[str] = None
+    status: Optional[str] = None
+    direction: Literal["inbound", "outbound"]
+    notes: Optional[str] = None
+
+# ---------------------------------------------------------------------
 # Example schemas (kept for reference)
 # ---------------------------------------------------------------------
 
