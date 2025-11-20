@@ -220,6 +220,14 @@ async def confirm_checkout(session_id: str):
     })
     return {"status": "succeeded", "session_id": session_id}
 
+
+@app.get("/payments")
+async def list_payments(limit: int = 100):
+    docs = get_documents("paymentrecord", {}, limit)
+    for d in docs:
+        d["_id"] = str(d.get("_id"))
+    return docs
+
 # ------------------------------------------------------
 # CSV export for analytics
 # ------------------------------------------------------
@@ -295,6 +303,14 @@ async def sms_send(req: SmsSendRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/sms")
+async def list_sms(limit: int = 200):
+    docs = get_documents("smsmessage", {}, limit)
+    for d in docs:
+        d["_id"] = str(d.get("_id"))
+    return docs
+
+
 @app.post("/sms/webhook", response_class=PlainTextResponse)
 async def sms_webhook(request: Request):
     form = await request.form()
@@ -355,6 +371,14 @@ async def voice_call(req: CallRequest):
         return {"sid": call.sid, "status": call.status}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/calls")
+async def list_calls(limit: int = 200):
+    docs = get_documents("calllog", {}, limit)
+    for d in docs:
+        d["_id"] = str(d.get("_id"))
+    return docs
 
 
 @app.post("/voice/twiml", response_class=PlainTextResponse)
