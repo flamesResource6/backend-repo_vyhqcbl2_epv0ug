@@ -112,6 +112,39 @@ class CallLog(BaseModel):
     notes: Optional[str] = None
 
 # ---------------------------------------------------------------------
+# Authentication & Organizations
+# ---------------------------------------------------------------------
+
+Role = Literal["admin", "user"]
+
+class AuthUser(BaseModel):
+    """
+    Application users
+    Collection: "authuser"
+    """
+    name: str
+    email: EmailStr
+    password_hash: str
+    is_active: bool = True
+
+class Organization(BaseModel):
+    """
+    Organizations/teams
+    Collection: "organization"
+    """
+    name: str
+    owner_email: EmailStr
+
+class Membership(BaseModel):
+    """
+    User membership to organizations
+    Collection: "membership"
+    """
+    user_email: EmailStr
+    org_id: str
+    role: Role = "admin"
+
+# ---------------------------------------------------------------------
 # Example schemas (kept for reference)
 # ---------------------------------------------------------------------
 

@@ -1,18 +1,30 @@
 import os
-from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Request, Form
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
+
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from database import db, create_document, get_documents
-from schemas import Lead, ChatMessage, Booking, SupportTicket, PaymentRecord, SmsMessage, CallLog
+from schemas import (
+    Lead, ChatMessage, Booking, SupportTicket, PaymentRecord,
+    SmsMessage, CallLog,
+    AuthUser, Organization, Membership
+)
 
 # Twilio SDK
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
+
+# JWT + password hashing
+import jwt
+import hashlib
+import secrets
+from bson import ObjectId
 
 app = FastAPI(title="AHC Front Desk Assistant API")
 
@@ -24,6 +36,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ------------------------------------------------------
+# Auth helpers (password hashing + JWT)
+# ------------------------------------------------------
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "43200"))  # 30 days default
+
+
+def hash_password(password: str, salt: Optional[str] = None) -> Dict[str, str]:
+    salt = salt or secrets.token_hex(16)
+    pwd_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        100_000,
+        dklen=32,
+    ).hex()
+    return {"salt": salt, "hash": pwd_hash}
+
+
+def verify_password(password: str, salt: str, expected_hash: str) -> bool:
+    return hash_password(password, salt)["hash"] == expected_hash
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: Dict[str, Any]
+
+
+async def get_current_user(request: Request) -> Dict[str, Any]:
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = auth_header.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    users = get_documents("authuser", {"email": email}, 1)
+    if not users:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    user = users[0]
+    user["_id"] = str(user.get("_id"))
+    # remove sensitive
+    user.pop("password_hash", None)
+    user.pop("password_salt", None)
+    return user
+
+
+# ------------------------------------------------------
+# Twilio helpers
+# ------------------------------------------------------
 
 def get_twilio_client():
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
@@ -105,7 +184,108 @@ def test_database():
     response["twilio_phone_number"] = "✅ Set" if os.getenv("TWILIO_PHONE_NUMBER") else "❌ Not Set"
     response["twilio_validate_signature"] = os.getenv("TWILIO_VALIDATE_SIGNATURE", "false")
 
+    # Auth presence
+    response["auth_secret_key"] = "✅ Set" if os.getenv("SECRET_KEY") else "⚠️ Using default"
+
     return response
+
+# ------------------------------------------------------
+# Authentication & Users
+# ------------------------------------------------------
+
+class SignupRequest(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+@app.post("/auth/signup", response_model=TokenResponse)
+async def auth_signup(req: SignupRequest):
+    existing = get_documents("authuser", {"email": req.email.lower()}, 1)
+    if existing:
+        raise HTTPException(status_code=400, detail="User already exists")
+
+    hp = hash_password(req.password)
+    user_doc = {
+        "name": req.name,
+        "email": req.email.lower(),
+        "password_hash": hp["hash"],
+        "password_salt": hp["salt"],
+        "is_active": True,
+    }
+    _id = create_document("authuser", user_doc)
+
+    token = create_access_token({"sub": req.email.lower()})
+    safe_user = {"id": _id, "name": req.name, "email": req.email.lower()}
+    return TokenResponse(access_token=token, user=safe_user)
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def auth_login(req: LoginRequest):
+    users = get_documents("authuser", {"email": req.email.lower()}, 1)
+    if not users:
+        raise HTTPException(status_code=400, detail="Invalid credentials")
+    user = users[0]
+    if not verify_password(req.password, user.get("password_salt", ""), user.get("password_hash", "")):
+        raise HTTPException(status_code=400, detail="Invalid credentials")
+
+    token = create_access_token({"sub": user["email"]})
+    safe_user = {"id": str(user.get("_id")), "name": user.get("name"), "email": user.get("email")}
+    return TokenResponse(access_token=token, user=safe_user)
+
+
+@app.get("/auth/me")
+async def auth_me(current_user: Dict[str, Any] = Depends(get_current_user)):
+    return current_user
+
+
+# ------------------------------------------------------
+# Organizations & Memberships
+# ------------------------------------------------------
+
+class OrgCreateRequest(BaseModel):
+    name: str
+
+
+@app.post("/orgs")
+async def create_org(req: OrgCreateRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    org = {
+        "name": req.name,
+        "owner_email": current_user["email"],
+    }
+    org_id = create_document("organization", org)
+
+    create_document("membership", {
+        "user_email": current_user["email"],
+        "org_id": org_id,
+        "role": "admin",
+    })
+
+    return {"id": org_id, "name": req.name}
+
+
+@app.get("/orgs/mine")
+async def list_my_orgs(current_user: Dict[str, Any] = Depends(get_current_user)):
+    memberships = get_documents("membership", {"user_email": current_user["email"]}, 100)
+    org_ids = [m.get("org_id") for m in memberships if m.get("org_id")]
+    if not org_ids:
+        return []
+
+    # Convert to ObjectId list for query
+    try:
+        oids = [ObjectId(oid) for oid in org_ids]
+    except Exception:
+        oids = []
+    orgs = get_documents("organization", {"_id": {"$in": oids}}, 100)
+    for o in orgs:
+        o["_id"] = str(o.get("_id"))
+    return orgs
+
 
 # ------------------------------------------------------
 # Lead capture & qualification
